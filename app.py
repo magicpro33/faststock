@@ -7,6 +7,7 @@
 # -----------------------------------
 
 import io
+import time
 import requests
 import numpy as np
 import pandas as pd
@@ -29,16 +30,74 @@ st.title("📈 Hybrid Stock Screener")
 st.caption("Screens S&P 500, NYSE, or NASDAQ for individual companies — ETFs, funds, and index products excluded.")
 
 # ───────────────────────────────────────────────────────────────
-# METRIC CONFIG  — name, score weight, description
+# METRIC CONFIG  — name, default weight, full description
 # ───────────────────────────────────────────────────────────────
 METRICS = {
-    "OE_Yield":       {"label": "OE Yield",         "weight": 3, "desc": "Owner Earnings / Market Cap  (×3)"},
-    "ROIC":           {"label": "ROIC",              "weight": 2, "desc": "Return on Invested Capital   (×2)"},
-    "ROIC_Trend":     {"label": "ROIC Trend",        "weight": 2, "desc": "YoY change in ROIC           (×2)"},
-    "RevenueGrowth":  {"label": "Revenue Growth",    "weight": 1, "desc": "Revenue growth rate          (×1)"},
-    "EarningsGrowth": {"label": "Earnings Growth",   "weight": 1, "desc": "Earnings growth rate         (×1)"},
-    "Piotroski":      {"label": "Piotroski Score",   "weight": 1, "desc": "Accounting health 0–9        (×1)"},
-    "BuyingPressure": {"label": "Buying Pressure",   "weight": 2, "desc": "OBV + MFI + PCV composite    (×2)"},
+    "OE_Yield": {
+        "label":   "OE Yield",
+        "weight":  3,
+        "desc":    "Owner Earnings Yield = (Net Income + Depreciation − CapEx) ÷ Market Cap. "
+                   "Warren Buffett's preferred measure of true cash profitability relative to price. "
+                   "Higher is better — above 5% is considered good value.",
+    },
+    "ROIC": {
+        "label":   "ROIC",
+        "weight":  2,
+        "desc":    "Return on Invested Capital = NOPAT ÷ Invested Capital. "
+                   "Measures how efficiently a company generates profit from the capital deployed. "
+                   "Above 15% suggests a durable competitive advantage (moat).",
+    },
+    "ROIC_Trend": {
+        "label":   "ROIC Trend",
+        "weight":  2,
+        "desc":    "Year-over-year change in ROIC. A rising ROIC means the company's moat is "
+                   "widening — it's earning more from each dollar of capital over time. "
+                   "Positive = improving; negative = deteriorating.",
+    },
+    "RevenueGrowth": {
+        "label":   "Revenue Growth",
+        "weight":  1,
+        "desc":    "Year-over-year revenue growth rate. Measures top-line expansion. "
+                   "Above 5% annually is considered healthy for a mature company; "
+                   "high-growth companies often show 15–30%+.",
+    },
+    "EarningsGrowth": {
+        "label":   "Earnings Growth",
+        "weight":  1,
+        "desc":    "Year-over-year earnings (EPS) growth rate. Confirms that revenue growth "
+                   "is translating into real profit. Ideally grows faster than revenue, "
+                   "indicating improving operating leverage.",
+    },
+    "Piotroski": {
+        "label":   "Piotroski Score",
+        "weight":  1,
+        "desc":    "9-point accounting health score (F-Score) developed by Stanford professor "
+                   "Joseph Piotroski. Tests profitability, leverage, and operating efficiency. "
+                   "7–9 = financially strong; 0–2 = weak or potentially distressed.",
+    },
+    "OBV": {
+        "label":   "OBV (On-Balance Volume)",
+        "weight":  1,
+        "desc":    "On-Balance Volume tracks cumulative buying vs selling pressure by adding "
+                   "volume on up-days and subtracting on down-days. A rising OBV slope over "
+                   "the last 20 days means institutions are quietly accumulating shares. "
+                   "Score: 1.0 if slope is positive, 0.0 if negative.",
+    },
+    "MFI": {
+        "label":   "MFI (Money Flow Index)",
+        "weight":  1,
+        "desc":    "Money Flow Index is a volume-weighted RSI (0–100). It measures whether "
+                   "money is flowing into or out of a stock. Above 50 = net buying pressure; "
+                   "above 60 = strong buying. Score scales from 0 (MFI=50) to 1.0 (MFI=100).",
+    },
+    "PCV": {
+        "label":   "PCV (Price-Confirmed Volume)",
+        "weight":  1,
+        "desc":    "Price-Confirmed Volume measures what fraction of recent volume occurred "
+                   "on days the stock closed higher than the prior day. If >55% of volume "
+                   "happens on up-days, buyers are in control. Score scales from 0 (50/50) "
+                   "to 1.0 (all up-day volume).",
+    },
 }
 
 ALL_SECTORS = [
@@ -117,21 +176,52 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("📊 Metrics  (toggle to include/exclude)")
+    st.header("📊 Metrics")
+    st.caption("Toggle on/off and adjust weight in the final score.")
+
     metric_enabled = {}
-    for key, cfg in METRICS.items():
-        metric_enabled[key] = st.toggle(
-            cfg["label"],
-            value=True,
-            help=cfg["desc"],
-        )
+    metric_weight  = {}
+
+    # ── Fundamental metrics ──────────────────────────────────────
+    st.markdown("**Fundamental**")
+    for key in ["OE_Yield", "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth", "Piotroski"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], value=True, key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                f"Weight", min_value=0.0, max_value=5.0,
+                value=float(cfg["weight"]), step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Volume / buying pressure metrics ────────────────────────
+    st.markdown("**Volume & Buying Pressure**")
+    for key in ["OBV", "MFI", "PCV"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], value=True, key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                f"Weight", min_value=0.0, max_value=5.0,
+                value=float(cfg["weight"]), step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
 
     st.divider()
     st.header("🔧 Performance")
     max_workers = st.slider(
         "Parallel Workers",
-        min_value=1, max_value=20, value=10, step=1,
-        help="Higher = faster scan but more network load."
+        min_value=1, max_value=20, value=5, step=1,
+        help="Lower values reduce rate-limiting errors on cloud. Recommended: 3–5 on Streamlit Cloud, 10+ on local PC."
     )
 
     mfi_period = st.slider(
@@ -147,38 +237,52 @@ with st.sidebar:
 # SIGNAL FUNCTIONS  (identical logic to stock_screener_2026.py)
 # ───────────────────────────────────────────────────────────────
 
-def get_buying_pressure(stock, mfi_period):
+def get_volume_signals(stock, mfi_period):
+    """
+    Returns a dict with three separate volume/buying-pressure scores, each 0.0–1.0:
+
+    OBV  — On-Balance Volume trend over last 20 days (1.0 = rising, 0.0 = falling)
+    MFI  — Money Flow Index scaled above 50 neutral (0.0–1.0)
+    PCV  — Price-Confirmed Volume fraction on up-days, scaled above 50% baseline (0.0–1.0)
+    """
+    default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
     try:
         hist = stock.history(period="6mo")
         if hist.empty or len(hist) < mfi_period + 5:
-            return 0
+            return default
         close, high, low, vol = hist["Close"], hist["High"], hist["Low"], hist["Volume"]
 
+        # ── OBV ──────────────────────────────────────────────────
         direction = np.sign(close.diff().fillna(0))
-        obv = (direction * vol).cumsum()
+        obv       = (direction * vol).cumsum()
         obv_slope = np.polyfit(range(20), obv.iloc[-20:].values, 1)[0]
         obv_score = 1.0 if obv_slope > 0 else 0.0
 
+        # ── MFI ──────────────────────────────────────────────────
         typical_price = (high + low + close) / 3
-        raw_mf = typical_price * vol
+        raw_mf  = typical_price * vol
         tp_diff = typical_price.diff()
-        pos_mf = raw_mf.where(tp_diff > 0, 0).rolling(mfi_period).sum()
-        neg_mf = raw_mf.where(tp_diff < 0, 0).rolling(mfi_period).sum()
-        mfr = pos_mf / neg_mf.replace(0, np.nan)
-        mfi = 100 - (100 / (1 + mfr))
-        mfi_latest = mfi.iloc[-1]
-        mfi_score = max(0.0, (mfi_latest - 50) / 50) if pd.notnull(mfi_latest) else 0.0
+        pos_mf  = raw_mf.where(tp_diff > 0, 0).rolling(mfi_period).sum()
+        neg_mf  = raw_mf.where(tp_diff < 0, 0).rolling(mfi_period).sum()
+        mfr     = pos_mf / neg_mf.replace(0, np.nan)
+        mfi_val = (100 - (100 / (1 + mfr))).iloc[-1]
+        mfi_score = max(0.0, (mfi_val - 50) / 50) if pd.notnull(mfi_val) else 0.0
 
-        recent = hist.iloc[-20:].copy()
+        # ── PCV ──────────────────────────────────────────────────
+        recent    = hist.iloc[-20:].copy()
         recent["up_day"] = recent["Close"] > recent["Close"].shift(1)
-        up_vol = recent.loc[recent["up_day"], "Volume"].sum()
+        up_vol    = recent.loc[recent["up_day"], "Volume"].sum()
         total_vol = recent["Volume"].sum()
         pcv_ratio = up_vol / total_vol if total_vol > 0 else 0.5
         pcv_score = max(0.0, (pcv_ratio - 0.5) / 0.5)
 
-        return round((obv_score + mfi_score + pcv_score) / 3, 4)
+        return {
+            "OBV": round(obv_score, 4),
+            "MFI": round(mfi_score, 4),
+            "PCV": round(pcv_score, 4),
+        }
     except:
-        return 0
+        return default
 
 
 def calculate_piotroski(stock):
@@ -262,40 +366,56 @@ def calculate_roic_trend(stock):
 
 def process_ticker(args):
     t, mfi_period = args
-    try:
-        stock = yf.Ticker(t)
-        info  = stock.info
-
-        # Exclude ETFs, index funds, trusts, and other non-company securities
-        if is_etf_or_fund(info):
-            return None
-
-        price = info.get("currentPrice")
-        owner_earnings, oe_yield = get_owner_earnings(stock, info)
-        buying_pressure = get_buying_pressure(stock, mfi_period)
+    # Retry up to 3 times with backoff — yfinance can return empty data
+    # on the first attempt when running in cloud environments
+    for attempt in range(3):
         try:
-            hist = stock.history(period="3mo")
-            ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-        except:
-            ma50 = None
-        return {
-            "Ticker":         t,
-            "Sector":         info.get("sector", "Unknown"),
-            "Price":          price,
-            "MA50":           ma50,
-            "MarketCap":      info.get("marketCap"),
-            "P/E":            info.get("trailingPE"),
-            "OwnerEarnings":  owner_earnings,
-            "OE_Yield":       oe_yield,
-            "ROIC":           calculate_roic(stock),
-            "ROIC_Trend":     calculate_roic_trend(stock),
-            "RevenueGrowth":  info.get("revenueGrowth"),
-            "EarningsGrowth": info.get("earningsGrowth"),
-            "Piotroski":      calculate_piotroski(stock),
-            "BuyingPressure": buying_pressure,
-        }
-    except:
-        return None
+            time.sleep(attempt * 1.5)   # 0s, 1.5s, 3s between retries
+            stock = yf.Ticker(t)
+            info  = stock.info
+
+            # yfinance returns an empty/minimal dict for invalid tickers
+            if not info or len(info) < 5:
+                return None
+
+            # Exclude ETFs, index funds, trusts, and other non-company securities
+            if is_etf_or_fund(info):
+                return None
+
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if price is None:
+                return None   # skip tickers with no price data
+
+            owner_earnings, oe_yield = get_owner_earnings(stock, info)
+            vol_signals = get_volume_signals(stock, mfi_period)
+            try:
+                hist = stock.history(period="3mo")
+                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+            except:
+                ma50 = None
+            return {
+                "Ticker":         t,
+                "Sector":         info.get("sector", "Unknown"),
+                "Price":          price,
+                "MA50":           ma50,
+                "MarketCap":      info.get("marketCap"),
+                "P/E":            info.get("trailingPE"),
+                "OwnerEarnings":  owner_earnings,
+                "OE_Yield":       oe_yield,
+                "ROIC":           calculate_roic(stock),
+                "ROIC_Trend":     calculate_roic_trend(stock),
+                "RevenueGrowth":  info.get("revenueGrowth"),
+                "EarningsGrowth": info.get("earningsGrowth"),
+                "Piotroski":      calculate_piotroski(stock),
+                "OBV":            vol_signals["OBV"],
+                "MFI":            vol_signals["MFI"],
+                "PCV":            vol_signals["PCV"],
+            }
+        except Exception:
+            if attempt == 2:
+                return None   # all 3 attempts failed
+            continue
+    return None
 
 # ───────────────────────────────────────────────────────────────
 # TICKER LOADERS
@@ -436,7 +556,13 @@ if run_btn:
     progress_bar.empty()
 
     if not results:
-        st.error("No results returned. Check your internet connection.")
+        st.error(
+            "No results returned. This is usually caused by yfinance rate limiting on Streamlit Cloud. "
+            "Try these fixes:\n\n"
+            "1. **Reduce Parallel Workers** to 3 in the sidebar and run again\n"
+            "2. **Wait 60 seconds** and try again — rate limits reset quickly\n"
+            "3. If it keeps failing, try scanning a **single sector** instead of all sectors to reduce the number of requests"
+        )
         st.stop()
 
     # Build DataFrame
@@ -445,13 +571,14 @@ if run_btn:
 
     numeric_cols = ["Price", "MA50", "MarketCap", "P/E", "OwnerEarnings", "OE_Yield",
                     "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
-                    "Piotroski", "BuyingPressure"]
+                    "Piotroski", "OBV", "MFI", "PCV"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["ROIC_Trend"]     = df["ROIC_Trend"].fillna(np.nan)
-    df["BuyingPressure"] = df["BuyingPressure"].fillna(0)
+    df["ROIC_Trend"] = df["ROIC_Trend"].fillna(np.nan)
+    for vol_col in ["OBV", "MFI", "PCV"]:
+        df[vol_col] = df[vol_col].fillna(0)
 
     # ── Sector filter — applied here using yfinance sector (authoritative) ──
     if sector != "All Sectors":
@@ -459,22 +586,26 @@ if run_btn:
         if df.empty:
             st.error(f"No results found for sector: **{sector}**. The sector name may differ from yfinance labels.")
             st.stop()
-    df["P/E"]            = df["P/E"].round(2)
-    df["OE_Yield"]       = df["OE_Yield"].round(2)
-    df["EarningsYield"]  = df["P/E"].apply(lambda x: round(1/x, 2) if pd.notnull(x) and x > 0 else 0)
-    df["ROIC"]           = df["ROIC"].round(2)
-    df["ROIC_Trend"]     = df["ROIC_Trend"].round(2)
-    df["BuyingPressure"] = df["BuyingPressure"].round(4)
-    df["MA50"]           = pd.to_numeric(df["MA50"], errors="coerce").round(2)
-    df["Rank_EY"]        = df["EarningsYield"].rank(ascending=False, method="min")
-    df["Rank_ROIC"]      = df["ROIC"].fillna(0).rank(ascending=False, method="min")
-    df["MagicFormula"]   = df["Rank_EY"] + df["Rank_ROIC"]
 
-    # Dynamic score — only include metrics that are toggled ON
+    df["P/E"]           = df["P/E"].round(2)
+    df["OE_Yield"]      = df["OE_Yield"].round(2)
+    df["EarningsYield"] = df["P/E"].apply(lambda x: round(1/x, 2) if pd.notnull(x) and x > 0 else 0)
+    df["ROIC"]          = df["ROIC"].round(2)
+    df["ROIC_Trend"]    = df["ROIC_Trend"].round(2)
+    df["OBV"]           = df["OBV"].round(4)
+    df["MFI"]           = df["MFI"].round(4)
+    df["PCV"]           = df["PCV"].round(4)
+    df["MA50"]          = pd.to_numeric(df["MA50"], errors="coerce").round(2)
+    df["Rank_EY"]       = df["EarningsYield"].rank(ascending=False, method="min")
+    df["Rank_ROIC"]     = df["ROIC"].fillna(0).rank(ascending=False, method="min")
+    df["MagicFormula"]  = df["Rank_EY"] + df["Rank_ROIC"]
+
+    # Dynamic score — use sidebar weight sliders, skip disabled metrics
     score = pd.Series(0.0, index=df.index)
-    for key, cfg in METRICS.items():
+    for key in METRICS:
         if metric_enabled.get(key, False):
-            score += df[key].fillna(0) * cfg["weight"]
+            w = metric_weight.get(key, METRICS[key]["weight"])
+            score += df[key].fillna(0) * w
     df["Score"] = score.round(2)
 
     # Apply filters
@@ -521,8 +652,9 @@ if run_btn:
                 if pd.api.types.is_numeric_dtype(display[col]):
                     display[col] = display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
 
-        # Hide metrics that are toggled off from the display table
-        hidden_cols = [k for k, v in metric_enabled.items() if not v and k in display.columns]
+        # Hide columns for metrics that are toggled off
+        all_metric_keys = list(METRICS.keys())
+        hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
         display = display.drop(columns=hidden_cols, errors="ignore")
 
         styled = display.style.applymap(color_score, subset=["Score"])
@@ -554,15 +686,17 @@ else:
     > ⚠️ **ETFs, index funds, trusts, and other non-company securities are automatically excluded** from all results.
 
     ### Metric weights (when enabled)
-    | Metric | Weight | Ideal |
+    | Metric | Default Weight | Ideal |
     |---|---|---|
-    | OE Yield (Owner Earnings / Market Cap) | ×3 | > 5% |
-    | ROIC (Return on Invested Capital) | ×2 | > 15% |
-    | ROIC Trend (YoY change) | ×2 | Positive |
+    | OE Yield | ×3 | > 5% |
+    | ROIC | ×2 | > 15% |
+    | ROIC Trend | ×2 | Positive |
     | Revenue Growth | ×1 | > 5% |
     | Earnings Growth | ×1 | > 5% |
     | Piotroski Score | ×1 | 7–9 |
-    | Buying Pressure (OBV + MFI + PCV) | ×2 | > 0.5 |
+    | OBV (On-Balance Volume) | ×1 | 1.0 = rising accumulation |
+    | MFI (Money Flow Index) | ×1 | > 0.5 = buying pressure |
+    | PCV (Price-Confirmed Volume) | ×1 | > 0.5 = up-day volume dominant |
 
     ### Active filters
     - **Exchange** — defines the universe of tickers to scan
